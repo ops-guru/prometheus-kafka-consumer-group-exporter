@@ -1,4 +1,4 @@
-FROM python:3-slim
+FROM python:3.5.6-slim
 
 WORKDIR /usr/src/app
 
@@ -11,6 +11,7 @@ RUN pip install -e .
 COPY LICENSE /usr/src/app/
 COPY README.md /usr/src/app/
 
-EXPOSE 9208
+EXPOSE 9101
+VOLUME [ "/tmp" ]
 
-ENTRYPOINT ["python", "-u", "/usr/local/bin/prometheus-kafka-consumer-group-exporter"]
+ENTRYPOINT ["python", "-u", "/usr/local/bin/prometheus-kafka-consumer-group-exporter", "-p", "9101"]

@@ -43,7 +43,7 @@ def main():
     parser = argparse.ArgumentParser(
         description='Export Kafka consumer offsets to Prometheus.')
     parser.add_argument(
-        '-b', '--bootstrap-brokers', default='localhost',
+        '-b', '--bootstrap-brokers',
         help='Addresses of brokers in a Kafka cluster to talk to.' +
         ' Brokers should be separated by commas e.g. broker1,broker2.' +
         ' Ports can be provided if non-standard (9092) e.g. brokers1:9999.' +
@@ -94,7 +94,6 @@ def main():
     port = args.port
 
     consumer_config = {
-        'bootstrap_servers': 'localhost',
         'auto_offset_reset': 'latest',
         'group_id': None,
         'consumer_timeout_ms': 500
@@ -103,8 +102,12 @@ def main():
     for filename in args.consumer_config:
         with open(filename) as f:
             raw_config = javaproperties.load(f)
-            converted_config = {k.replace('.', '_'): v for k, v in raw_config.items()}
+            converted_config = {k.replace('.', '_'): int(v) if v.isdigit() else v for k, v in raw_config.items()}
             consumer_config.update(converted_config)
+
+    if not 'bootstrap_servers' in consumer_config:
+        consumer_config['bootstrap_servers'] = 'localhost'
+        logging.info('bootstrap_servers not specified - using localhost')
 
     if args.bootstrap_brokers:
         consumer_config['bootstrap_servers'] = args.bootstrap_brokers.split(',')

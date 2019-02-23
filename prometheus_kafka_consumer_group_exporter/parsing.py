@@ -48,3 +48,14 @@ def parse_value(bytes):
         (commit_timestamp, remaining_key) = read_long_long(remaining_key)
         (expire_timestamp, remaining_key) = read_long_long(remaining_key)
         return (version, offset, metadata, commit_timestamp, expire_timestamp)
+    elif version == 2:
+        (offset, remaining_key) = read_long_long(remaining_key)
+        (metadata, remaining_key) = read_string(remaining_key)
+        (commit_timestamp, remaining_key) = read_long_long(remaining_key)
+        return (version, offset, metadata, commit_timestamp)
+    elif version == 3:
+        (offset, remaining_key) = read_long_long(remaining_key)
+        (leader_epoch, remaining_key) = read_int(remaining_key)
+        (metadata, remaining_key) = read_string(remaining_key)
+        (commit_timestamp, remaining_key) = read_long_long(remaining_key)
+        return (version, offset, metadata, commit_timestamp, None, leader_epoch)
