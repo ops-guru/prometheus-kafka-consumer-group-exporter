@@ -43,10 +43,12 @@ def build_lowwaters():
     return lowwaters
 
 
-def fetch_topics(client, callback):
+def fetch_topics(client, callback, err_callback):
     logging.info('Requesting topics and partition assignments')
 
     try:
+        # do an async refresh of cluster metadata and establish connections to brokers
+        client.poll()
         node = client.least_loaded_node()
 
         logging.debug('Requesting topics and partition assignments from %(node)s',
@@ -55,17 +57,20 @@ def fetch_topics(client, callback):
         api_version = 0 if client.config['api_version'] < (0, 10) else 1
         request = MetadataRequest[api_version](None)
         f = client.send(node, request)
+        f.add_errback(err_callback)
         f.add_callback(callback, api_version)
 
     except Exception:
         logging.exception('Error requesting topics and partition assignments')
 
-
-def fetch_highwater(client, callback):
+def fetch_highwater(client, callback, err_callback):
     logging.info('Requesting high-water marks')
 
     try:
         if topics:
+            # do an async refresh of cluster metadata and establish connections to brokers
+            client.poll()
+
             nodes = {}
             for topic, partition_map in topics.items():
                 for partition, leader in partition_map.items():
@@ -102,17 +107,22 @@ def fetch_highwater(client, callback):
                      for topic, partitions in topic_map.items()]
                 )
                 f = client.send(node, request)
+                f.add_errback(err_callback)
                 f.add_callback(callback, node)
 
     except Exception:
         logging.exception('Error requesting high-water marks')
 
 
-def fetch_lowwater(client, callback):
+def fetch_lowwater(client, callback, err_callback):
     logging.info('Requesting low-water marks')
     try:
         if topics:
+            # do an async refresh of cluster metadata and establish connections to brokers
+            client.poll()
+
             nodes = {}
+
             for topic, partition_map in topics.items():
                 for partition, leader in partition_map.items():
                     if leader not in nodes:
@@ -148,11 +158,14 @@ def fetch_lowwater(client, callback):
                      for topic, partitions in topic_map.items()]
                 )
                 f = client.send(node, request)
+                f.add_errback(err_callback)
                 f.add_callback(callback, node)
 
     except Exception:
         logging.exception('Error requesting low-water marks')
 
+def update_topics_err(e):
+    logging.error('Failed to retrieve topics and partition assignments: %r', e)
 
 def update_topics(api_version, metadata):
     logging.info('Received topics and partition assignments')
@@ -202,6 +215,8 @@ def update_topics(api_version, metadata):
     global topics
     topics = new_topics
 
+def fetch_highwater_err(e):
+    logging.error('Failed to request high-water marks: %r', e)
 
 def update_highwater(node, offsets):
     logging.info('Received high-water marks from node {}'.format(node))
@@ -226,9 +241,11 @@ def update_highwater(node, offsets):
     global node_highwaters
     node_highwaters[node] = highwaters
 
+def fetch_lowwater_err(e):
+    logging.error('Failed to request low_water marks: %r', e)
 
 def update_lowwater(node, offsets):
-    logging.info('Received high-water marks from node {}'.format(node))
+    logging.info('Received low-water marks from node {}'.format(node))
 
     lowwaters = {}
     for topic, partitions in offsets.topics:
@@ -258,9 +275,9 @@ def setup_fetch_jobs(topic_interval, high_water_interval, low_water_interval,
         jobs = []
 
     jobs = scheduler.add_scheduled_job(jobs, topic_interval,
-                                       fetch_topics, client, update_topics)
+                                       fetch_topics, client, update_topics, update_topics_err)
     jobs = scheduler.add_scheduled_job(jobs, high_water_interval,
-                                       fetch_highwater, client, update_highwater)
+                                       fetch_highwater, client, update_highwater, fetch_highwater_err)
     jobs = scheduler.add_scheduled_job(jobs, low_water_interval,
-                                       fetch_lowwater, client, update_lowwater)
+                                       fetch_lowwater, client, update_lowwater, fetch_lowwater_err)
     return jobs

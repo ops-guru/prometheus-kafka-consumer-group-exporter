@@ -3,6 +3,8 @@ import javaproperties
 import logging
 import signal
 import sys
+import random
+import string
 
 from jog import JogFormatter
 from kafka import KafkaConsumer
@@ -12,21 +14,10 @@ from prometheus_client.core import REGISTRY
 from . import scheduler, collectors
 from .fetch_jobs import setup_fetch_jobs
 from .parsing import parse_key, parse_value
+from .mp_consume import MultiProcessConsumer
+from .helpers import ensure_dict_key
 
-
-# Check if a dict contains a key, returning
-# a copy with the key if not.
-# Effectively a way to immutably add a key
-# to a dictionary, allowing other threads
-# to safely iterate over it.
-def ensure_dict_key(curr_dict, key, new_value):
-    if key in curr_dict:
-        return curr_dict
-
-    new_dict = curr_dict.copy()
-    new_dict[key] = new_value
-    return new_dict
-
+from pprint import pprint
 
 def shutdown():
     logging.info('Shutting down')
@@ -35,6 +26,119 @@ def shutdown():
 
 def signal_handler(signum, frame):
     shutdown()
+
+
+def merge_commits(target, dict):
+    for group, group_value in dict.items():
+        if group not in target:
+            target = ensure_dict_key(target, group, group_value)
+        else:
+            for topic, topic_value in group_value.items():
+                if topic not in target[group]:
+                    target[group] = ensure_dict_key(target[group], topic, topic_value)
+                else:
+                    for partition, partition_value in topic_value.items():
+                        if partition not in target[group][topic]:
+                            target[group][topic] = ensure_dict_key(target[group][topic], partition, partition_value)
+                        else:
+                            target[group][topic][partition] += partition_value
+
+    return target
+
+
+def merge_offsets(target, dict):
+    for group, group_value in dict.items():
+        if group not in target:
+            target = ensure_dict_key(target, group, group_value)
+        else:
+            for topic, topic_value in group_value.items():
+                if topic not in target[group]:
+                    target[group] = ensure_dict_key(target[group], topic, topic_value)
+                else:
+                    for partition, partition_value in topic_value.items():
+                        if partition not in target[group][topic]:
+                            target[group][topic] = ensure_dict_key(target[group][topic], partition, partition_value)
+                        else:
+                            target[group][topic][partition] = partition_value
+
+    return target
+
+
+def merge_exporter_offsets(target, dict):
+    for partition, partition_value in dict.items():
+        if partition not in target:
+            target = ensure_dict_key(target, partition, partition_value)
+        elif partition_value > target[partition]:
+            target[partition] = partition_value
+
+    return target
+
+
+def id_generator(size=24, chars=string.ascii_uppercase + string.digits):
+    return ''.join(random.choice(chars) for _ in range(size))
+
+
+def cleanup_conf(conf):
+    valid_options = (
+        'bootstrap_servers',
+        'client_id',
+        'group_id',
+        'key_deserializer',
+        'value_deserializer',
+        'fetch_max_wait_ms',
+        'fetch_min_bytes',
+        'fetch_max_bytes',
+        'max_partition_fetch_bytes',
+        'request_timeout_ms',
+        'retry_backoff_ms',
+        'reconnect_backoff_ms',
+        'reconnect_backoff_max_ms',
+        'max_in_flight_requests_per_connection',
+        'auto_offset_reset',
+        'enable_auto_commit',
+        'auto_commit_interval_ms',
+        'default_offset_commit_callback',
+        'check_crcs',
+        'metadata_max_age_ms',
+        'partition_assignment_strategy',
+        'max_poll_records',
+        'max_poll_interval_ms',
+        'session_timeout_ms',
+        'heartbeat_interval_ms',
+        'receive_buffer_bytes',
+        'send_buffer_bytes',
+        'socket_options',
+        'sock_chunk_bytes',
+        'sock_chunk_buffer_count',
+        'consumer_timeout_ms',
+        'skip_double_compressed_messages',
+        'security_protocol',
+        'ssl_context',
+        'ssl_check_hostname',
+        'ssl_cafile',
+        'ssl_certfile',
+        'ssl_keyfile',
+        'ssl_crlfile',
+        'ssl_password',
+        'api_version',
+        'api_version_auto_timeout_ms',
+        'connections_max_idle_ms',
+        'metric_reporters',
+        'metrics_num_samples',
+        'metrics_sample_window_ms',
+        'metric_group_prefix',
+        'selector',
+        'exclude_internal_topics',
+        'sasl_mechanism',
+        'sasl_plain_username',
+        'sasl_plain_password',
+        'sasl_kerberos_service_name',
+        'sasl_kerberos_domain_name'
+    )
+
+    newconf = {k: conf[k] for k in valid_options if k in conf}
+
+    return newconf
 
 
 def main():
@@ -51,6 +155,14 @@ def main():
     parser.add_argument(
         '-p', '--port', type=int, default=9208,
         help='Port to serve the metrics endpoint on. (default: 9208)')
+    parser.add_argument(
+        '-c', '--consumers', type=int, default=1,
+        help='Number of Kakfa consumers to use (parallelism)'
+    )
+    parser.add_argument(
+        '--use-confluent-kafka', action='store_true',
+        help='Use confluent_kafka rather than kafka-python for consumption'
+    )
     parser.add_argument(
         '-s', '--from-start', action='store_true',
         help='Start from the beginning of the `__consumer_offsets` topic.')
@@ -99,10 +211,21 @@ def main():
         'consumer_timeout_ms': 500
     }
 
+    # the same config is used both for kafka-python and confluent_kafka
+    # most important properties have the same names (except _ being used instead of .)
+    # one difference is that in case of single consumer kafka-python requires group_id not to be set
+    # while confluent_kafka always requires to have group_id
+    if not args.use_confluent_kafka:
+        if args.consumers > 1:
+            consumer_config['group_id'] = 'prometheus-kafka-consumer-exporter-' + id_generator()
+            consumer_config['enable_auto_commit'] = False
+    else:
+        consumer_config['group_id'] = 'prometheus-kafka-consumer-exporter-' + id_generator()
+   
     for filename in args.consumer_config:
         with open(filename) as f:
             raw_config = javaproperties.load(f)
-            converted_config = {k.replace('.', '_'): int(v) if v.isdigit() else v for k, v in raw_config.items()}
+            converted_config = {k: int(v) if v.isdigit() else True if v == 'True' else False if v == 'False' else v for k, v in raw_config.items()}
             consumer_config.update(converted_config)
 
     if not 'bootstrap_servers' in consumer_config:
@@ -115,9 +238,11 @@ def main():
     if args.from_start:
         consumer_config['auto_offset_reset'] = 'earliest'
 
+    # retain only settings relevant for kafka-python
+    kafka_python_consumer_config = cleanup_conf(consumer_config)
+
     consumer = KafkaConsumer(
-        '__consumer_offsets',
-        **consumer_config
+        **kafka_python_consumer_config
     )
     client = consumer._client
 
@@ -141,40 +266,22 @@ def main():
 
     scheduled_jobs = setup_fetch_jobs(topic_interval, high_water_interval, low_water_interval, client)
 
+    mpc = MultiProcessConsumer(args.use_confluent_kafka, args.consumers, 5, args.json_logging, args.log_level, args.verbose, **consumer_config)
     try:
         while True:
-            for message in consumer:
+            for item in mpc:
+
                 offsets = collectors.get_offsets()
                 commits = collectors.get_commits()
                 exporter_offsets = collectors.get_exporter_offsets()
 
-                exporter_partition = message.partition
-                exporter_offset = message.offset
-                exporter_offsets = ensure_dict_key(exporter_offsets, exporter_partition, exporter_offset)
-                exporter_offsets[exporter_partition] = exporter_offset
+                exporter_offsets = merge_exporter_offsets(exporter_offsets, item[0])
+                offsets = merge_offsets(offsets, item[1])
+                commits = merge_offsets(commits, item[2])
+
                 collectors.set_exporter_offsets(exporter_offsets)
-
-                if message.key and message.value:
-                    key = parse_key(message.key)
-                    if key:
-                        value = parse_value(message.value)
-
-                        group = key[1]
-                        topic = key[2]
-                        partition = key[3]
-                        offset = value[1]
-
-                        offsets = ensure_dict_key(offsets, group, {})
-                        offsets[group] = ensure_dict_key(offsets[group], topic, {})
-                        offsets[group][topic] = ensure_dict_key(offsets[group][topic], partition, offset)
-                        offsets[group][topic][partition] = offset
-                        collectors.set_offsets(offsets)
-
-                        commits = ensure_dict_key(commits, group, {})
-                        commits[group] = ensure_dict_key(commits[group], topic, {})
-                        commits[group][topic] = ensure_dict_key(commits[group][topic], partition, 0)
-                        commits[group][topic][partition] += 1
-                        collectors.set_commits(commits)
+                collectors.set_offsets(offsets)
+                collectors.set_commits(commits)
 
                 # Check if we need to run any scheduled jobs
                 # each message.
@@ -188,4 +295,5 @@ def main():
     except KeyboardInterrupt:
         pass
 
+    mpc.stop()
     shutdown()

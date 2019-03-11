@@ -24,6 +24,8 @@ Run with the `-h` flag to see details on all the available arguments.
 
 Prometheus metrics can then be scraped from the `/metrics` path, e.g. http://localhost:9208/metrics. Metrics are currently actually exposed on all paths, but this may change in the future and `/metrics` is the standard path for Prometheus metric endpoints.
 
+By default exporter uses `kafka-python` client and consumes messages from the `__consumer_offsets` topic using a single consumer (i.e. partitions are being handled by it). Sometimes this might not be enough in case of many consumer groups and frequent offset pushes. To consume faster specify `-c` parameter which tells how many consumer subprocesses to use. Whether exporter is catching up can be confirmed with `kafka_consumer_group_exporter_lag` metric. If that is still not enough `--use-confluent-kafka` switch allows to use `confluent-kafka` instead of `python-kafka` which is much faster because of its CPython implementation. Please note that in this case exporter still uses `kafka-python` client for broker requests like retrieving topics and querying high/low watermarks. Both `kafka-python` and `confluent-kafka` are configured via `--consumer-config` and share the same configuration file because they do not have overlapping configuration options - hence in case of `confluent-kafka` you have to configure settings for both `confluent-kafka` and `kafka-python`. Please refer to https://github.com/edenhill/librdkafka/blob/master/CONFIGURATION.md for a list of `confluent-kafka` configuration options. Usually default values are enough - but for example TLS communication with a broker requires extra confiuration values to be specified.
+
 # Metrics
 Nine main metrics are exported:
 

@@ -21,6 +21,7 @@ setup(
     packages=find_packages(),
     install_requires=[
         'kafka-python >= 1.3',
+        'confluent_kafka',
         'jog',
         'prometheus-client',
         'javaproperties'
